@@ -26,6 +26,7 @@ local dao = DAOFactory(conf)
 --------------------
 local admin_port = string.match(conf.admin_listen, ":([%d]+)$")
 local proxy_port = string.match(conf.proxy_listen, ":([%d]+)$")
+local ssl_proxy_port = string.match(conf.proxy_listen_ssl, ":([%d]+)$")
 
 -----------------
 -- Custom helpers
@@ -68,7 +69,7 @@ function resty_http_proxy_mt:__index(k)
 end
 
 local function http_client(host, port, timeout)
-  timeout = timeout or 500
+  timeout = timeout or 5000
   local client = assert(http.new())
   assert(client:connect(host, port))
   client:set_timeout(timeout)
@@ -151,6 +152,7 @@ return {
   test_conf = conf,
   test_conf_path = TEST_CONF_PATH,
   proxy_port = proxy_port,
+  ssl_proxy_port = ssl_proxy_port,
   admin_port = admin_port,
 
   -- Kong testing helpers
