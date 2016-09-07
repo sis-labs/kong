@@ -1,14 +1,10 @@
+local pgmoon = require "pgmoon-mashape"
 local BaseDB = require "kong.dao.base_db"
 local Errors = require "kong.dao.errors"
-local uuid = require "lua_uuid"
 local utils = require "kong.tools.utils"
+local uuid = utils.uuid
 
 local TTL_CLEANUP_INTERVAL = 60 -- 1 minute
-
-local ngx_stub = _G.ngx
-_G.ngx = nil
-local pgmoon = require "pgmoon"
-_G.ngx = ngx_stub
 
 local PostgresDB = BaseDB:extend()
 
@@ -20,15 +16,30 @@ PostgresDB.dao_insert_values = {
 
 PostgresDB.additional_tables = {"ttls"}
 
-function PostgresDB:new(...)
-  PostgresDB.super.new(self, "postgres", ...)
+function PostgresDB:new(kong_config)
+  local conn_opts = {
+    host = kong_config.pg_host,
+    port = kong_config.pg_port,
+    user = kong_config.pg_user,
+    password = kong_config.pg_password,
+    database = kong_config.pg_database,
+    ssl = kong_config.pg_ssl,
+    ssl_verify = kong_config.pg_ssl_verify,
+    cafile = kong_config.lua_ssl_trusted_certificate
+  }
+
+  PostgresDB.super.new(self, "postgres", conn_opts)
 end
 
 -- TTL clean up timer functions
 
 local function do_clean_ttl(premature, postgres)
   if premature then return end
-  postgres:clear_expired_ttl()
+  
+  local ok, err = postgres:clear_expired_ttl()
+  if not ok then
+    ngx.log(ngx.ERR, "failed to cleanup TTLs: ", err)
+  end
   local ok, err = ngx.timer.at(TTL_CLEANUP_INTERVAL, do_clean_ttl, postgres)
   if not ok then
     ngx.log(ngx.ERR, "failed to create timer: ", err)
@@ -72,7 +83,7 @@ local function escape_literal(val, field)
     return "'"..tostring((val:gsub("'", "''"))).."'"
   elseif t_val == "boolean" then
     return val and "TRUE" or "FALSE"
-  elseif t_val == "table" and field and field.type == "table" then
+  elseif t_val == "table" and field and (field.type == "table" or field.type == "array") then
     local json = require "cjson"
     return escape_literal(json.encode(val))
   end
@@ -95,15 +106,17 @@ local function parse_error(err_str)
   local err
   if string.find(err_str, "Key .* already exists") then
     local col, value = string.match(err_str, "%((.+)%)=%((.+)%)")
-    err = Errors.unique {[col] = value}
+    if col then
+      err = Errors.unique {[col] = value}
+    end
   elseif string.find(err_str, "violates foreign key constraint") then
     local col, value = string.match(err_str, "%((.+)%)=%((.+)%)")
-    err = Errors.foreign {[col] = value}
-  else
-    err = Errors.db(err_str)
+    if col then
+      err = Errors.foreign {[col] = value}
+    end
   end
 
-  return err
+  return err or Errors.db(err_str)
 end
 
 local function get_select_fields(schema)
@@ -121,7 +134,7 @@ end
 
 -- Querying
 
-function PostgresDB:query(query)
+function PostgresDB:query(query, schema)
   PostgresDB.super.query(self, query)
 
   local conn_opts = self:_get_conn_options()
@@ -140,6 +153,8 @@ function PostgresDB:query(query)
 
   if res == nil then
     return nil, parse_error(err)
+  elseif schema ~= nil then
+    self:deserialize_rows(res, schema)
   end
 
   return res
@@ -189,6 +204,20 @@ function PostgresDB:get_select_query(select_clause, schema, table, where, offset
     query = query.." OFFSET "..offset
   end
   return query
+end
+
+function PostgresDB:deserialize_rows(rows, schema)
+  if schema then
+    local json = require "cjson"
+    for i, row in ipairs(rows) do
+      for col, value in pairs(row) do
+        if type(value) == "string" and schema.fields[col] and
+          (schema.fields[col].type == "table" or schema.fields[col].type == "array") then
+          rows[i][col] = json.decode(value)
+        end
+      end
+    end
+  end
 end
 
 function PostgresDB:deserialize_timestamps(row, schema)
@@ -241,7 +270,7 @@ function PostgresDB:ttl(tbl, table_name, schema, ttl)
   local expire_at = res[1].timestamp + (ttl * 1000)
 
   local query = string.format("SELECT upsert_ttl('%s', %s, '%s', '%s', to_timestamp(%d/1000) at time zone 'UTC')",
-                              tbl[schema.primary_key[1]], primary_key_type == "uuid" and "'"..tbl[schema.primary_key[1]].."'" or "NULL", 
+                              tbl[schema.primary_key[1]], primary_key_type == "uuid" and "'"..tbl[schema.primary_key[1]].."'" or "NULL",
                               schema.primary_key[1], table_name, expire_at)
   local _, err = self:query(query)
   if err then
@@ -270,13 +299,18 @@ function PostgresDB:clear_expired_ttl()
       return false, err
     end
   end
-  
+
   return true
 end
 
 function PostgresDB:insert(table_name, schema, model, _, options)
+  local values, err = self:serialize_timestamps(model, schema)
+  if err then
+    return nil, err
+  end
+
   local cols, args = {}, {}
-  for col, value in pairs(model) do
+  for col, value in pairs(values) do
     cols[#cols + 1] = escape_identifier(col)
     args[#args + 1] = escape_literal(value, schema.fields[col])
   end
@@ -286,7 +320,7 @@ function PostgresDB:insert(table_name, schema, model, _, options)
 
   local query = string.format("INSERT INTO %s(%s) VALUES(%s) RETURNING *",
                               table_name, cols, args)
-  local res, err = self:query(query)
+  local res, err = self:query(query, schema)
   if err then
     return nil, err
   elseif #res > 0 then
@@ -309,7 +343,7 @@ end
 function PostgresDB:find(table_name, schema, primary_keys)
   local where = get_where(primary_keys)
   local query = self:get_select_query(get_select_fields(schema), schema, table_name, where)
-  local rows, err = self:query(query)
+  local rows, err = self:query(query, schema)
   if err then
     return nil, err
   elseif rows and #rows > 0 then
@@ -324,7 +358,7 @@ function PostgresDB:find_all(table_name, tbl, schema)
   end
 
   local query = self:get_select_query(get_select_fields(schema), schema, table_name, where)
-  return self:query(query)
+  return self:query(query, schema)
 end
 
 function PostgresDB:find_page(table_name, tbl, page, page_size, schema)
@@ -346,7 +380,7 @@ function PostgresDB:find_page(table_name, tbl, page, page_size, schema)
   end
 
   local query = self:get_select_query(get_select_fields(schema), schema, table_name, where, offset, page_size)
-  local rows, err = self:query(query)
+  local rows, err = self:query(query, schema)
   if err then
     return nil, err
   end
@@ -392,7 +426,7 @@ function PostgresDB:update(table_name, schema, _, filter_keys, values, nils, ful
   local where = get_where(filter_keys)
   local query = string.format("UPDATE %s SET %s WHERE %s RETURNING *",
                               table_name, args, where)
-  local res, err = self:query(query)
+  local res, err = self:query(query, schema)
   if err then
     return nil, err
   elseif res and res.affected_rows == 1 then
@@ -416,7 +450,7 @@ function PostgresDB:delete(table_name, schema, primary_keys)
   local where = get_where(primary_keys)
   local query = string.format("DELETE FROM %s WHERE %s RETURNING *",
                               table_name, where)
-  local res, err = self:query(query)
+  local res, err = self:query(query, schema)
   if err then
     return nil, err
   end
@@ -438,7 +472,7 @@ function PostgresDB:queries(queries)
 end
 
 function PostgresDB:drop_table(table_name)
-  return select(2, self:query("DROP TABLE "..table_name))
+  return select(2, self:query("DROP TABLE "..table_name.." CASCADE"))
 end
 
 function PostgresDB:truncate_table(table_name)
@@ -447,7 +481,7 @@ end
 
 function PostgresDB:current_migrations()
   -- Check if schema_migrations table exists
-  local rows, err = self:query "SELECT to_regclass('public.schema_migrations')"
+  local rows, err = self:query "SELECT to_regclass('schema_migrations')"
   if err then
     return nil, err
   end

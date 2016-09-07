@@ -15,13 +15,13 @@ return {
 
       DO $$
       BEGIN
-        IF (SELECT to_regclass('public.oauth2_credentials_consumer_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_credentials_consumer_idx')) IS NULL THEN
           CREATE INDEX oauth2_credentials_consumer_idx ON oauth2_credentials(consumer_id);
         END IF;
-        IF (SELECT to_regclass('public.oauth2_credentials_client_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_credentials_client_idx')) IS NULL THEN
           CREATE INDEX oauth2_credentials_client_idx ON oauth2_credentials(client_id);
         END IF;
-        IF (SELECT to_regclass('public.oauth2_credentials_secret_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_credentials_secret_idx')) IS NULL THEN
           CREATE INDEX oauth2_credentials_secret_idx ON oauth2_credentials(client_secret);
         END IF;
       END$$;
@@ -39,10 +39,10 @@ return {
 
       DO $$
       BEGIN
-        IF (SELECT to_regclass('public.oauth2_autorization_code_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_autorization_code_idx')) IS NULL THEN
           CREATE INDEX oauth2_autorization_code_idx ON oauth2_authorization_codes(code);
         END IF;
-        IF (SELECT to_regclass('public.oauth2_authorization_userid_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_authorization_userid_idx')) IS NULL THEN
           CREATE INDEX oauth2_authorization_userid_idx ON oauth2_authorization_codes(authenticated_userid);
         END IF;
       END$$;
@@ -64,13 +64,13 @@ return {
 
       DO $$
       BEGIN
-        IF (SELECT to_regclass('public.oauth2_accesstoken_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_accesstoken_idx')) IS NULL THEN
           CREATE INDEX oauth2_accesstoken_idx ON oauth2_tokens(access_token);
         END IF;
-        IF (SELECT to_regclass('public.oauth2_token_refresh_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_token_refresh_idx')) IS NULL THEN
           CREATE INDEX oauth2_token_refresh_idx ON oauth2_tokens(refresh_token);
         END IF;
-        IF (SELECT to_regclass('public.oauth2_token_userid_idx')) IS NULL THEN
+        IF (SELECT to_regclass('oauth2_token_userid_idx')) IS NULL THEN
           CREATE INDEX oauth2_token_userid_idx ON oauth2_tokens(authenticated_userid);
         END IF;
       END$$;
@@ -79,6 +79,16 @@ return {
       DROP TABLE oauth2_credentials;
       DROP TABLE oauth2_authorization_codes;
       DROP TABLE oauth2_tokens;
+    ]]
+  },
+  {
+    name = "2016-07-15-oauth2_code_credential_id",
+    up = [[
+      DELETE FROM oauth2_authorization_codes;
+      ALTER TABLE oauth2_authorization_codes ADD COLUMN credential_id uuid REFERENCES oauth2_credentials (id) ON DELETE CASCADE;
+    ]],
+    down = [[
+      ALTER TABLE oauth2_authorization_codes DROP COLUMN credential_id;
     ]]
   }
 }
